@@ -10,7 +10,9 @@ import com.ctre.phoenix6.configs.TalonFXConfiguration;
 import com.ctre.phoenix6.controls.VoltageOut;
 import com.ctre.phoenix6.hardware.TalonFX;
 import edu.wpi.first.math.MathUtil;
+import edu.wpi.first.math.controller.ElevatorFeedforward;
 import edu.wpi.first.math.controller.PIDController;
+import edu.wpi.first.math.trajectory.TrapezoidProfile;
 import edu.wpi.first.units.measure.Angle;
 import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
@@ -23,12 +25,12 @@ import org.littletonrobotics.junction.Logger;
 import org.littletonrobotics.junction.networktables.LoggedNetworkNumber;
 
 /**
- * Mechanism A -- a linear extension driven by one Kraken X60 through a 2.5:1 gearbox onto a 1"
- * spool, traveling 0" to 11.5".
+ * Mechanism A -- a linear extension: one Kraken X60 through a 30:12 (2.5:1) gearbox to a 1"
+ * pitch-diameter pinion driving a rack, traveling 0" to 11.5".
  *
- * <p>This subsystem hosts TWO controllers the students compare, plus an OFF mode. Exactly one is
+ * <p>This subsystem hosts THREE controllers the students compare, plus an OFF mode. Exactly one is
  * active at a time; the buttons on Elastic switch between them (see the command factories at the
- * bottom). Both controllers drive to the SAME target (the {@code Target_Inches} tunable).
+ * bottom). All controllers drive to the SAME target (the {@code Target_Inches} tunable).
  *
  * <h2>Demo 1: Bang-Bang</h2>
  *
@@ -39,13 +41,22 @@ import org.littletonrobotics.junction.networktables.LoggedNetworkNumber;
  *
  * Output = kP*error + kI*(integral of error) + kD*(rate of error), clamped to a tunable max
  * voltage. Eases in smoothly as the error shrinks. Students tune kP, kI, kD live.
+ *
+ * <h2>Demo 3: Motion profile + feedforward</h2>
+ *
+ * A trapezoidal profile generates a smooth position/velocity setpoint that ramps up to a max
+ * velocity and back down (bounded by a max acceleration), and an elevator feedforward (ks, kg, kv,
+ * ka) turns that profiled motion into voltage -- it's predictive, with no feedback term. Students
+ * tune ks/kg/kv/ka and the max velocity/acceleration live, and the profiled setpoint is logged so
+ * it can be plotted against the actual position.
  */
 public class LinearExtension extends SubsystemBase {
   /** Which controller is currently driving the mechanism. Exactly one at a time. */
   public enum ControlMode {
     OFF,
     BANG_BANG,
-    PID
+    PID,
+    MOTION_PROFILE
   }
 
   private ControlMode mode = ControlMode.OFF; // safe default: nothing drives until a button is hit
@@ -66,16 +77,29 @@ public class LinearExtension extends SubsystemBase {
           Constants.LinearExtension.kDefaultKi,
           Constants.LinearExtension.kDefaultKd);
 
+  // Demo 3: elevator feedforward (ks, kg, kv, ka) + a trapezoidal profile. Gains are pushed in live
+  // via setters; the profile is rebuilt each loop from the tunable constraints. profileSetpoint is
+  // the moving target the profile advances one loop at a time (dt = kLoopPeriodSeconds).
+  private final ElevatorFeedforward feedforward =
+      new ElevatorFeedforward(
+          Constants.LinearExtension.kDefaultKs,
+          Constants.LinearExtension.kDefaultKg,
+          Constants.LinearExtension.kDefaultKv,
+          Constants.LinearExtension.kDefaultKa,
+          Constants.LinearExtension.kLoopPeriodSeconds);
+  private TrapezoidProfile.State profileSetpoint = new TrapezoidProfile.State();
+
   // Status signals we read each loop. Because we set SensorToMechanismRatio in the config below,
-  // position/velocity come back in SPOOL rotations, not motor rotations.
+  // position/velocity come back in PINION rotations, not motor rotations.
   private final StatusSignal<Angle> positionSignal = motor.getPosition();
   // Raw MOTOR (rotor) rotations, before the gearbox. getPosition() above is already divided by the
   // gear ratio (SensorToMechanismRatio), so this is a separate signal -- handy for showing students
-  // the 2.5:1 relationship between motor turns and spool travel.
+  // the 30:12 (2.5:1) relationship between motor turns and rack travel.
   private final StatusSignal<Angle> rotorPositionSignal = motor.getRotorPosition();
   private final StatusSignal<AngularVelocity> velocitySignal = motor.getVelocity();
   private final StatusSignal<Voltage> appliedVoltageSignal = motor.getMotorVoltage();
   private final StatusSignal<Current> statorCurrentSignal = motor.getStatorCurrent();
+  private final StatusSignal<Current> supplyCurrentSignal = motor.getSupplyCurrent();
 
   // ---- Dashboard tunables (published to NetworkTables under /Tuning, logged by AdvantageKit) ----
   // Anything under /Tuning shows up in AdvantageScope's tuning mode and can be edited in Elastic.
@@ -98,6 +122,22 @@ public class LinearExtension extends SubsystemBase {
   private final LoggedNetworkNumber pidMaxVolts =
       new LoggedNetworkNumber(
           "/Tuning/LinearExtension/PID_MaxVolts", Constants.LinearExtension.kDefaultPidMaxVolts);
+  private final LoggedNetworkNumber kS =
+      new LoggedNetworkNumber("/Tuning/LinearExtension/kS", Constants.LinearExtension.kDefaultKs);
+  private final LoggedNetworkNumber kG =
+      new LoggedNetworkNumber("/Tuning/LinearExtension/kG", Constants.LinearExtension.kDefaultKg);
+  private final LoggedNetworkNumber kV =
+      new LoggedNetworkNumber("/Tuning/LinearExtension/kV", Constants.LinearExtension.kDefaultKv);
+  private final LoggedNetworkNumber kA =
+      new LoggedNetworkNumber("/Tuning/LinearExtension/kA", Constants.LinearExtension.kDefaultKa);
+  private final LoggedNetworkNumber maxVelInPerSec =
+      new LoggedNetworkNumber(
+          "/Tuning/LinearExtension/Profile_MaxVel_InPerSec",
+          Constants.LinearExtension.kDefaultMaxVelInPerSec);
+  private final LoggedNetworkNumber maxAccelInPerSec2 =
+      new LoggedNetworkNumber(
+          "/Tuning/LinearExtension/Profile_MaxAccel_InPerSec2",
+          Constants.LinearExtension.kDefaultMaxAccelInPerSec2);
 
   public LinearExtension() {
     motor.getConfigurator().apply(buildConfig());
@@ -109,7 +149,8 @@ public class LinearExtension extends SubsystemBase {
         rotorPositionSignal,
         velocitySignal,
         appliedVoltageSignal,
-        statorCurrentSignal);
+        statorCurrentSignal,
+        supplyCurrentSignal);
     motor.optimizeBusUtilization();
 
     // Assume the mechanism boots fully retracted (0"). Students re-zero any time with the
@@ -123,8 +164,8 @@ public class LinearExtension extends SubsystemBase {
     cfg.MotorOutput.Inverted = Constants.LinearExtension.kInvert;
     cfg.MotorOutput.NeutralMode = Constants.LinearExtension.kNeutralMode;
 
-    // Tell the TalonFX the gearbox ratio so it reports position/velocity at the SPOOL, not the
-    // motor rotor. After this, getPosition() returns spool rotations.
+    // Tell the TalonFX the gearbox ratio so it reports position/velocity at the PINION, not the
+    // motor rotor. After this, getPosition() returns pinion rotations.
     cfg.Feedback.SensorToMechanismRatio = Constants.LinearExtension.kGearRatio;
 
     cfg.CurrentLimits.StatorCurrentLimit = Constants.LinearExtension.kStatorCurrentLimitAmps;
@@ -152,7 +193,8 @@ public class LinearExtension extends SubsystemBase {
         rotorPositionSignal,
         velocitySignal,
         appliedVoltageSignal,
-        statorCurrentSignal);
+        statorCurrentSignal,
+        supplyCurrentSignal);
 
     double positionInches = getPositionInches();
     // Both controllers share this setpoint. Clamped to the physical range so a fat-fingered target
@@ -169,6 +211,7 @@ public class LinearExtension extends SubsystemBase {
         switch (mode) {
           case BANG_BANG -> bangBangVolts(error);
           case PID -> pidVolts(positionInches, target);
+          case MOTION_PROFILE -> profileVolts(target);
           case OFF -> 0.0;
         };
 
@@ -186,6 +229,7 @@ public class LinearExtension extends SubsystemBase {
     Logger.recordOutput("LinearExtension/AppliedVolts", appliedVoltageSignal.getValueAsDouble());
     Logger.recordOutput("LinearExtension/VelocityInchesPerSec", getVelocityInchesPerSec());
     Logger.recordOutput("LinearExtension/StatorCurrentAmps", statorCurrentSignal.getValueAsDouble());
+    Logger.recordOutput("LinearExtension/SupplyCurrentAmps", supplyCurrentSignal.getValueAsDouble());
 
     // Friendly text for an Elastic widget right next to the buttons.
     SmartDashboard.putString("LinearExtension/ActiveController", mode.toString());
@@ -204,7 +248,7 @@ public class LinearExtension extends SubsystemBase {
     Logger.recordOutput("LinearExtension/DeadbandInches", deadband);
 
     if (Math.abs(error) <= deadband) {
-      return 0.0; // close enough -> coast/brake, don't fight
+      return 0.0; // close enough -> 0 V, let it settle (coasts by default)
     }
     return error > 0.0 ? kv : -kv; // below target -> extend (+), above -> retract (-)
   }
@@ -231,14 +275,54 @@ public class LinearExtension extends SubsystemBase {
     return clamped;
   }
 
+  // ============================ DEMO 3: MOTION PROFILE + FEEDFORWARD ============================
+  private double profileVolts(double target) {
+    // Live-tune the feedforward gains.
+    feedforward.setKs(kS.get());
+    feedforward.setKg(kG.get());
+    feedforward.setKv(kV.get());
+    feedforward.setKa(kA.get());
+
+    // Rebuild the profile from the (live-tunable) constraints and step it one loop toward the goal.
+    TrapezoidProfile profile =
+        new TrapezoidProfile(
+            new TrapezoidProfile.Constraints(
+                Math.abs(maxVelInPerSec.get()), Math.abs(maxAccelInPerSec2.get())));
+    TrapezoidProfile.State goal = new TrapezoidProfile.State(target, 0.0);
+    TrapezoidProfile.State next =
+        profile.calculate(Constants.LinearExtension.kLoopPeriodSeconds, profileSetpoint, goal);
+
+    // Feedforward voltage to follow this step: ks/kg hold it, kv for the profiled speed, ka for the
+    // profiled acceleration (implied by the velocity change over one loop). No feedback term.
+    double volts = feedforward.calculateWithVelocities(profileSetpoint.velocity, next.velocity);
+
+    profileSetpoint = next; // advance the profile for the next loop
+
+    // Log the TARGET PROFILE -- the moving setpoint the mechanism should be tracking. Plot
+    // Profile_SetpointInches on top of PositionInches to see how well the feedforward follows it.
+    Logger.recordOutput("LinearExtension/Profile_SetpointInches", next.position);
+    Logger.recordOutput("LinearExtension/Profile_SetpointVelInPerSec", next.velocity);
+    Logger.recordOutput("LinearExtension/Profile_GoalInches", target);
+
+    return MathUtil.clamp(
+        volts,
+        -Constants.LinearExtension.kMaxDriveVolts,
+        Constants.LinearExtension.kMaxDriveVolts);
+  }
+
   // ---- Controller selection. Each command switches to its mode and (because there is a single
   // mode field) automatically disables the others. Published as Elastic buttons in RobotContainer.
   // ignoringDisable(true) lets you pre-select a controller while the robot is still disabled. ----
 
-  /** Sets the active controller and resets PID state when entering PID mode. */
+  /** Sets the active controller, resetting controller state on entry so it starts cleanly. */
   public void setControlMode(ControlMode newMode) {
     if (newMode == ControlMode.PID && mode != ControlMode.PID) {
       pid.reset(); // clear the integral accumulator so PID starts fresh
+    }
+    if (newMode == ControlMode.MOTION_PROFILE && mode != ControlMode.MOTION_PROFILE) {
+      // Start the profile from where the mechanism actually is (assumed at rest) for a smooth
+      // handoff -- otherwise it would jump from a stale setpoint.
+      profileSetpoint = new TrapezoidProfile.State(getPositionInches(), 0.0);
     }
     mode = newMode;
   }
@@ -257,6 +341,12 @@ public class LinearExtension extends SubsystemBase {
     return runOnce(() -> setControlMode(ControlMode.PID))
         .ignoringDisable(true)
         .withName("Use PID");
+  }
+
+  public Command useMotionProfileCommand() {
+    return runOnce(() -> setControlMode(ControlMode.MOTION_PROFILE))
+        .ignoringDisable(true)
+        .withName("Use Motion Profile");
   }
 
   public Command disableCommand() {
@@ -280,13 +370,18 @@ public class LinearExtension extends SubsystemBase {
     return rotationsToInches(velocitySignal.getValueAsDouble());
   }
 
-  // ---- Unit conversions (spool rotations <-> inches). The gear ratio is already handled by
-  // SensorToMechanismRatio, so here we only convert spool rotations to travel. ----
-  private static double rotationsToInches(double spoolRotations) {
-    return spoolRotations * Constants.LinearExtension.kSpoolCircumferenceInches;
+  // ---- Unit conversions (pinion rotations <-> inches of rack travel). The gear ratio is already
+  // handled by SensorToMechanismRatio, so here we only convert pinion revolutions to travel. The
+  // temporary scale calibration (see Constants.kPositionScaleCalibration) is folded in here. ----
+  private static double rotationsToInches(double pinionRotations) {
+    return pinionRotations
+        * Constants.LinearExtension.kPinionCircumferenceInches
+        * Constants.LinearExtension.kPositionScaleCalibration;
   }
 
   private static double inchesToRotations(double inches) {
-    return inches / Constants.LinearExtension.kSpoolCircumferenceInches;
+    return inches
+        / (Constants.LinearExtension.kPinionCircumferenceInches
+            * Constants.LinearExtension.kPositionScaleCalibration);
   }
 }

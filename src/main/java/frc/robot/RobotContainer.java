@@ -36,6 +36,8 @@ public class RobotContainer {
     // and automatically disables the others. On boot nothing drives until you pick one.
     SmartDashboard.putData("LinearExtension/Use Bang-Bang", linearExtension.useBangBangCommand());
     SmartDashboard.putData("LinearExtension/Use PID", linearExtension.usePidCommand());
+    SmartDashboard.putData(
+        "LinearExtension/Use Motion Profile", linearExtension.useMotionProfileCommand());
     SmartDashboard.putData("LinearExtension/Disable Controller", linearExtension.disableCommand());
 
     // Zeroing buttons (define "here" as 0" / horizontal). Safe to click while disabled.

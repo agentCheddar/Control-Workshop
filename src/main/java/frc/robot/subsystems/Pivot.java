@@ -25,7 +25,8 @@ import org.littletonrobotics.junction.Logger;
  * <p>This class is deliberately just the "plumbing": it configures the motor, converts to degrees,
  * zeroes, logs telemetry, and offers a safety-clamped {@link #setVoltage(double)} so you can nudge
  * it by hand. The tuned controller (a later demo) will build on top of this. There is no controller
- * running yet, so with brake mode + a 150:1 ratio it simply holds position when left alone.
+ * running yet; the 150:1 ratio strongly resists back-driving, but in the default Coast mode a heavy
+ * arm could still drift under gravity -- set kNeutralMode to Brake in Constants if it won't stay put.
  */
 public class Pivot extends SubsystemBase {
   private final TalonFX motor = new TalonFX(Constants.Pivot.kMotorCanId, Constants.kCANBus);
@@ -40,6 +41,7 @@ public class Pivot extends SubsystemBase {
   private final StatusSignal<AngularVelocity> velocitySignal = motor.getVelocity();
   private final StatusSignal<Voltage> appliedVoltageSignal = motor.getMotorVoltage();
   private final StatusSignal<Current> statorCurrentSignal = motor.getStatorCurrent();
+  private final StatusSignal<Current> supplyCurrentSignal = motor.getSupplyCurrent();
 
   public Pivot() {
     motor.getConfigurator().apply(buildConfig());
@@ -49,7 +51,8 @@ public class Pivot extends SubsystemBase {
         rotorPositionSignal,
         velocitySignal,
         appliedVoltageSignal,
-        statorCurrentSignal);
+        statorCurrentSignal,
+        supplyCurrentSignal);
     motor.optimizeBusUtilization();
 
     // Assume we boot at horizontal (0deg). Re-zero with the Elastic "Zero Pivot" button.
@@ -86,7 +89,8 @@ public class Pivot extends SubsystemBase {
         rotorPositionSignal,
         velocitySignal,
         appliedVoltageSignal,
-        statorCurrentSignal);
+        statorCurrentSignal,
+        supplyCurrentSignal);
 
     Logger.recordOutput("Pivot/PositionDegrees", getPositionDegrees()); // mechanism position
     Logger.recordOutput(
@@ -94,6 +98,7 @@ public class Pivot extends SubsystemBase {
     Logger.recordOutput("Pivot/VelocityDegreesPerSec", getVelocityDegreesPerSec());
     Logger.recordOutput("Pivot/AppliedVolts", appliedVoltageSignal.getValueAsDouble());
     Logger.recordOutput("Pivot/StatorCurrentAmps", statorCurrentSignal.getValueAsDouble());
+    Logger.recordOutput("Pivot/SupplyCurrentAmps", supplyCurrentSignal.getValueAsDouble());
   }
 
   /** Resets the encoder so the pivot's current spot is treated as horizontal (0deg). */

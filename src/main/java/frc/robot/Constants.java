@@ -91,9 +91,15 @@ public final class Constants {
     public static final double kDefaultKa = 0.0; // V per inch/sec^2
     public static final double kDefaultMaxVelInPerSec = 10.0;
     public static final double kDefaultMaxAccelInPerSec2 = 20.0;
+    public static final double kDefaultProfileMaxVolts = 6.0; // output cap, clamped to kMaxDriveVolts
 
     // Robot loop period; used for the motion-profile time step and feedforward discretization.
     public static final double kLoopPeriodSeconds = 0.020;
+
+    // Settle timer: the mechanism counts as "arrived" when it is within this tolerance of the target
+    // (inches) AND its speed is within this tolerance of zero (inches/sec). One value is used for
+    // both, per the workshop spec.
+    public static final double kDefaultSettleTolerance = 0.25;
   }
 
   /**

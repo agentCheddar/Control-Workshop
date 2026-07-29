@@ -97,11 +97,12 @@ velocity, cruises, then decelerates into the goal (bounded by a max acceleration
 turns that profiled motion into voltage:
 
 ```
-volts = kS·sign(v) + kG + kV·v + kA·a      (v, a from the profile; then clamped to ±6 V)
+volts = kS·sign(v) + kG + kV·v + kA·a      (v, a from the profile; then clamped to ±Profile_MaxVolts)
 ```
 
 This one is **predictive / open-loop** — no error-feedback term, so it leans entirely on good
-feedforward gains. Students tune **kS, kG, kV, kA** and the **max velocity / acceleration** live.
+feedforward gains. Students tune **kS, kG, kV, kA**, the **max velocity / acceleration**, and a **max
+voltage** live (the output cap, itself clamped to the 0–6 V hardware ceiling).
 Tune kG first (holds against gravity — 0 if horizontal), then kV (volts per inch/sec), a small kS,
 and kA last. The profiled setpoint is logged (`Profile_SetpointInches`) so you can overlay it on the
 actual position and see how well the feedforward tracks.
@@ -146,6 +147,8 @@ text/number widget or slider; editing takes effect immediately, no redeploy):
 | `Tuning/LinearExtension/kA` | Demo 3: acceleration feedforward (V per inch/sec²) | 0.0 |
 | `Tuning/LinearExtension/Profile_MaxVel_InPerSec` | Demo 3: profile top speed (inch/sec) | 10.0 |
 | `Tuning/LinearExtension/Profile_MaxAccel_InPerSec2` | Demo 3: profile acceleration (inch/sec²) | 20.0 |
+| `Tuning/LinearExtension/Profile_MaxVolts` | Demo 3: output voltage cap. **Clamped to 0–6 V.** | 6.0 |
+| `Tuning/LinearExtension/Settle_Tolerance` | Settle timer: "arrived" band for both position (in) and speed (in/s) | 0.25 |
 
 > `Kv_Volts` is labeled **Kv** per the workshop plan. Note that "Kv" normally means a velocity
 > feedforward gain — here it is simply the fixed bang-bang voltage. The code comments call this out
@@ -161,6 +164,25 @@ Elastic shows these command buttons (published from `RobotContainer`):
 - **`LinearExtension/Zero`** — sets the current position as 0". Retract the mechanism by hand first,
   then click (works while **disabled**).
 - **`Pivot/Zero`** — same idea, defines the current pose as horizontal (0°).
+
+### Timing the controllers (how fast is each one?)
+
+A settle stopwatch runs for whichever controller is active:
+
+- **Starts** the moment you change `Target_Inches` (a new commanded move).
+- **Stops** once the mechanism is within `Settle_Tolerance` of the target **and** its speed is within
+  that same tolerance of zero — i.e. it actually arrived and stopped, not just blew past.
+- **`Timer_LastSettleSec`** is that move's time; **`Timer_AverageSettleSec`** averages all moves since
+  the last disable (disabling the robot resets the average).
+
+To compare controllers fairly: pick a controller, change the target, read the time; switch to the
+next controller, change the target again, compare. Watch `Timer_ElapsedSec` count up live and freeze
+at the settle time. *(Bang-bang may never satisfy the velocity part of the tolerance because it
+chatters — that's a real result: it doesn't truly settle. Loosen `Settle_Tolerance` if you want it to
+register.)*
+
+Only target **changes** start the timer (per the workshop design), and only while a controller is
+active (not OFF) — so a controller switch alone won't restart it. Nudge the target to time a fresh run.
 
 ### The tuning lesson
 
@@ -211,7 +233,10 @@ AdvantageKit records everything below to a `.wpilog` (USB) **and** streams it li
 | `CommandedVolts`, `AppliedVolts` | what the controller asked for vs. what the motor did |
 | `ClampedKv`, `DeadbandInches` | Demo 1 (bang-bang) values in effect |
 | `PID_RawVolts`, `PID_MaxVolts` | Demo 2: PID output before clamping, and the cap |
-| `Profile_SetpointInches`, `Profile_SetpointVelInPerSec`, `Profile_GoalInches` | Demo 3: the moving profile target — overlay on `PositionInches` |
+| `Profile_SetpointInches`, `Profile_SetpointVelInPerSec`, `Profile_GoalInches`, `Profile_MaxVolts` | Demo 3: the moving profile target (overlay on `PositionInches`) and the output cap |
+| `Timer_Running`, `Timer_ElapsedSec` | settle stopwatch: whether it's timing, and the live/last elapsed |
+| `Timer_LastSettleSec`, `Timer_AverageSettleSec`, `Timer_SettleCount` | most-recent settle time, running average (resets on disable), and sample count |
+| `SettleTolerance` | the "arrived" band in effect |
 | `VelocityInchesPerSec`, `StatorCurrentAmps`, `SupplyCurrentAmps` | motor-side vs. battery-side current |
 
 Pivot logs `PositionDegrees` (mechanism), `MotorRotations` (raw rotor), `VelocityDegreesPerSec`, `AppliedVolts`, `StatorCurrentAmps`, `SupplyCurrentAmps`.
@@ -234,6 +259,8 @@ smooth reactive glide-in vs. following a planned profile is the money shot for t
 - **All voltages are clamped 0–6 V in software** — bang-bang `Kv` and `PID_MaxVolts` both — so typing
   50 into Elastic still can't exceed 6 V. Raise `kMaxDriveVolts` in `Constants.java` for more.
 - **Controller is OFF on boot** — nothing drives until you click a controller button.
+- **Controllers don't run while disabled** — output holds 0 V and the PID integrator / motion-profile
+  setpoint reset every disabled loop, so nothing winds up or lurches the moment you enable.
 - **Demo 3 is open-loop** — the motion profile + feedforward has no feedback term, so a mistuned kV/kG
   can drift or run away (still capped at ±6 V). Start with small gains and watch `Profile_SetpointInches`
   vs. `PositionInches`.

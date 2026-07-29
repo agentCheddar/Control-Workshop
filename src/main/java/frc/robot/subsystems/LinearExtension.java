@@ -17,6 +17,8 @@ import edu.wpi.first.units.measure.Angle;
 import edu.wpi.first.units.measure.AngularVelocity;
 import edu.wpi.first.units.measure.Current;
 import edu.wpi.first.units.measure.Voltage;
+import edu.wpi.first.wpilibj.DriverStation;
+import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
@@ -138,6 +140,26 @@ public class LinearExtension extends SubsystemBase {
       new LoggedNetworkNumber(
           "/Tuning/LinearExtension/Profile_MaxAccel_InPerSec2",
           Constants.LinearExtension.kDefaultMaxAccelInPerSec2);
+  private final LoggedNetworkNumber profileMaxVolts =
+      new LoggedNetworkNumber(
+          "/Tuning/LinearExtension/Profile_MaxVolts",
+          Constants.LinearExtension.kDefaultProfileMaxVolts);
+  private final LoggedNetworkNumber settleTolerance =
+      new LoggedNetworkNumber(
+          "/Tuning/LinearExtension/Settle_Tolerance",
+          Constants.LinearExtension.kDefaultSettleTolerance);
+
+  // ---- Settle timer: measures how long the active controller takes to reach the target and stop,
+  // so students can see how fast each controller really is. Starts when the target changes; stops
+  // when |position error| and |velocity| are both within the tolerance. The average resets whenever
+  // the robot is disabled. ----
+  private final Timer settleTimer = new Timer();
+  private double lastTarget = Double.NaN; // NaN so the very first loop isn't seen as a "change"
+  private boolean timing = false;
+  private double lastSettleSec = 0.0; // most recent completed settle time
+  private double settleSumSec = 0.0; // running sum for the average (reset on disable)
+  private int settleCount = 0;
+  private boolean wasEnabled = false;
 
   public LinearExtension() {
     motor.getConfigurator().apply(buildConfig());
@@ -207,13 +229,26 @@ public class LinearExtension extends SubsystemBase {
     double error = target - positionInches; // + means we are below the target
 
     // Pick the active controller. Switching modes is what the Elastic buttons do.
-    double outputVolts =
-        switch (mode) {
-          case BANG_BANG -> bangBangVolts(error);
-          case PID -> pidVolts(positionInches, target);
-          case MOTION_PROFILE -> profileVolts(target);
-          case OFF -> 0.0;
-        };
+    //
+    // While the robot is DISABLED we run NO controller. periodic() keeps running when disabled, so
+    // if we let the PID keep calling calculate() it would accumulate integral against an error the
+    // motor can't act on -- winding up to its clamp and lurching the instant you enable. So we hold
+    // 0 V and reset the stateful controllers (PID integrator, motion-profile setpoint) every
+    // disabled loop, guaranteeing a fresh start on enable.
+    double outputVolts;
+    if (DriverStation.isEnabled()) {
+      outputVolts =
+          switch (mode) {
+            case BANG_BANG -> bangBangVolts(error);
+            case PID -> pidVolts(positionInches, target);
+            case MOTION_PROFILE -> profileVolts(target);
+            case OFF -> 0.0;
+          };
+    } else {
+      outputVolts = 0.0;
+      pid.reset(); // no integral windup while disabled
+      profileSetpoint = new TrapezoidProfile.State(positionInches, 0.0); // keep the profile at reality
+    }
 
     motor.setControl(voltageRequest.withOutput(outputVolts));
 
@@ -233,6 +268,56 @@ public class LinearExtension extends SubsystemBase {
 
     // Friendly text for an Elastic widget right next to the buttons.
     SmartDashboard.putString("LinearExtension/ActiveController", mode.toString());
+
+    // How fast did the active controller get there?
+    updateSettleTimer(target, positionInches);
+  }
+
+  // ---- Settle timer: how fast did the active controller actually reach the target? ----
+  private void updateSettleTimer(double target, double positionInches) {
+    double tol = Math.abs(settleTolerance.get());
+    double velocity = getVelocityInchesPerSec();
+    boolean enabled = DriverStation.isEnabled();
+
+    // The average resets each time the robot becomes disabled; also drop any move in progress.
+    if (!enabled && wasEnabled) {
+      settleSumSec = 0.0;
+      settleCount = 0;
+      timing = false;
+      settleTimer.stop();
+    }
+    wasEnabled = enabled;
+
+    // Only run the stopwatch while a real controller is actively driving.
+    boolean active = enabled && mode != ControlMode.OFF;
+    if (active) {
+      // Start (restart) the stopwatch the instant a new target is commanded.
+      if (!Double.isNaN(lastTarget) && Math.abs(target - lastTarget) > 1e-6) {
+        settleTimer.restart();
+        timing = true;
+      }
+      // Stop once we are within tolerance of the target AND essentially stopped.
+      if (timing && Math.abs(target - positionInches) <= tol && Math.abs(velocity) <= tol) {
+        lastSettleSec = settleTimer.get();
+        settleTimer.stop();
+        timing = false;
+        settleSumSec += lastSettleSec;
+        settleCount++;
+      }
+      lastTarget = target; // remember for next loop's change detection
+    } else {
+      timing = false; // not actively controlling -> no stopwatch
+    }
+
+    double averageSec = settleCount > 0 ? settleSumSec / settleCount : 0.0;
+
+    Logger.recordOutput("LinearExtension/SettleTolerance", tol);
+    Logger.recordOutput("LinearExtension/Timer_Running", timing);
+    Logger.recordOutput(
+        "LinearExtension/Timer_ElapsedSec", timing ? settleTimer.get() : lastSettleSec);
+    Logger.recordOutput("LinearExtension/Timer_LastSettleSec", lastSettleSec);
+    Logger.recordOutput("LinearExtension/Timer_AverageSettleSec", averageSec);
+    Logger.recordOutput("LinearExtension/Timer_SettleCount", settleCount);
   }
 
   // ============================ DEMO 1: BANG-BANG ============================
@@ -277,6 +362,13 @@ public class LinearExtension extends SubsystemBase {
 
   // ============================ DEMO 3: MOTION PROFILE + FEEDFORWARD ============================
   private double profileVolts(double target) {
+    // Output voltage cap -- tunable, but never allowed past the hardware safety ceiling.
+    double maxVolts =
+        MathUtil.clamp(
+            profileMaxVolts.get(),
+            Constants.LinearExtension.kMinDriveVolts,
+            Constants.LinearExtension.kMaxDriveVolts);
+
     // Live-tune the feedforward gains.
     feedforward.setKs(kS.get());
     feedforward.setKg(kG.get());
@@ -303,11 +395,9 @@ public class LinearExtension extends SubsystemBase {
     Logger.recordOutput("LinearExtension/Profile_SetpointInches", next.position);
     Logger.recordOutput("LinearExtension/Profile_SetpointVelInPerSec", next.velocity);
     Logger.recordOutput("LinearExtension/Profile_GoalInches", target);
+    Logger.recordOutput("LinearExtension/Profile_MaxVolts", maxVolts);
 
-    return MathUtil.clamp(
-        volts,
-        -Constants.LinearExtension.kMaxDriveVolts,
-        Constants.LinearExtension.kMaxDriveVolts);
+    return MathUtil.clamp(volts, -maxVolts, maxVolts);
   }
 
   // ---- Controller selection. Each command switches to its mode and (because there is a single

@@ -90,22 +90,26 @@ Students tune **kP, kI, kD** and the **max voltage** live. Start P-only (kI = kD
 it's responsive, then add a little kD to tame overshoot. The output is clamped to the tunable
 `PID_MaxVolts` (never above the 0–6 V hardware ceiling).
 
-### Demo 3 — Motion profile + feedforward
+### Demo 3 — Motion profile + feedforward + path-following PID
 
 A **trapezoidal motion profile** generates a smooth, moving setpoint — position ramps up to a max
-velocity, cruises, then decelerates into the goal (bounded by a max acceleration). A feedforward
-turns that profiled motion into voltage:
+velocity, cruises, then decelerates into the goal (bounded by a max acceleration). A **feedforward**
+predicts the voltage for that motion, and a **PID corrects the error against the profile setpoint**
+(the moving point on the path — *not* the final goal), so it tracks the whole trajectory:
 
 ```
-volts = kS·sign(v) + kG + kV·v + kA·a      (v, a from the profile; then clamped to ±Profile_MaxVolts)
+volts = [ kS·sign(v) + kG + kV·v + kA·a ]  +  PID(profileSetpoint − position)
+        └────────── feedforward ──────────┘    └──── path-following feedback ────┘
+        (then clamped to ±Profile_MaxVolts)
 ```
 
-This one is **predictive / open-loop** — no error-feedback term, so it leans entirely on good
-feedforward gains. Students tune **kS, kG, kV, kA**, the **max velocity / acceleration**, and a **max
-voltage** live (the output cap, itself clamped to the 0–6 V hardware ceiling).
-Tune kG first (holds against gravity — 0 if horizontal), then kV (volts per inch/sec), a small kS,
-and kA last. The profiled setpoint is logged (`Profile_SetpointInches`) so you can overlay it on the
-actual position and see how well the feedforward tracks.
+This is the best-tracking controller of the three: the feedforward does the bulk of the work and the
+PID cleans up whatever it misses. Because the reference is the *profile* setpoint (typically a
+fraction of an inch away), the PID stays small and gentle — it corrects path error, not the whole
+distance to the goal. Students tune **kS, kG, kV, kA**, the **max velocity / acceleration**, the **max
+voltage**, and the path-following **kP / kI / kD** live. Tune the feedforward first (kG for gravity —
+0 if horizontal — then kV, a small kS, kA last) so `Profile_FeedbackVolts` stays near zero, then add
+kP to pull the actual position onto the profile line.
 
 ### Choosing a controller (Elastic buttons)
 
@@ -148,6 +152,9 @@ text/number widget or slider; editing takes effect immediately, no redeploy):
 | `Tuning/LinearExtension/Profile_MaxVel_InPerSec` | Demo 3: profile top speed (inch/sec) | 10.0 |
 | `Tuning/LinearExtension/Profile_MaxAccel_InPerSec2` | Demo 3: profile acceleration (inch/sec²) | 20.0 |
 | `Tuning/LinearExtension/Profile_MaxVolts` | Demo 3: output voltage cap. **Clamped to 0–6 V.** | 6.0 |
+| `Tuning/LinearExtension/Profile_kP` | Demo 3: path-following gain (V per inch of *path* error) | 1.0 |
+| `Tuning/LinearExtension/Profile_kI` | Demo 3: path-following integral gain | 0.0 |
+| `Tuning/LinearExtension/Profile_kD` | Demo 3: path-following derivative gain | 0.0 |
 | `Tuning/LinearExtension/Settle_Tolerance` | Settle timer: "arrived" band for both position (in) and speed (in/s) | 0.25 |
 
 > `Kv_Volts` is labeled **Kv** per the workshop plan. Note that "Kv" normally means a velocity
@@ -197,19 +204,20 @@ active (not OFF) — so a controller switch alone won't restart it. Nudge the ta
 - **kI** → erases steady-state error (the last fraction of an inch), but too much causes slow
   oscillation / windup.
 
-**Motion profile + feedforward:**
+**Motion profile + feedforward + PID:**
 - **kV too low** → lags behind the profile (actual trails `Profile_SetpointInches`). **Too high** →
   runs ahead / overshoots.
 - **kG** → if it drifts down at rest, raise kG; if it creeps up, lower it.
 - **kS** → just enough to break static friction; too much makes it lurch off the start.
 - **Max velocity / acceleration** → shape of the ramp. Lower = gentler and easier to follow.
-- Because it's open-loop, it holds position only as well as the gains are tuned — pair it with a
-  little PID in a real robot. Here it isolates the feedforward so students see it on its own.
+- **Path-following kP/kI/kD** → tune the feedforward FIRST (so `Profile_FeedbackVolts` sits near 0),
+  then raise kP to snap the actual position onto the profile line; kD damps, kI erases the last bit
+  of steady-state error. Since it corrects against the *moving* setpoint, a little goes a long way.
 
 **The payoff:** switch between all three on the same target and watch `PositionInches` vs.
 `TargetInches` (and `Profile_SetpointInches` for Demo 3). Bang-bang chatters; a tuned PID glides in
-reactively; the motion profile follows a planned path predictively. That contrast is the whole point
-of the workshop.
+reactively; the motion profile follows a planned trajectory (feedforward predicting the motion, a
+small PID correcting the path). That progression is the whole point of the workshop.
 
 ---
 
@@ -234,6 +242,7 @@ AdvantageKit records everything below to a `.wpilog` (USB) **and** streams it li
 | `ClampedKv`, `DeadbandInches` | Demo 1 (bang-bang) values in effect |
 | `PID_RawVolts`, `PID_MaxVolts` | Demo 2: PID output before clamping, and the cap |
 | `Profile_SetpointInches`, `Profile_SetpointVelInPerSec`, `Profile_GoalInches`, `Profile_MaxVolts` | Demo 3: the moving profile target (overlay on `PositionInches`) and the output cap |
+| `Profile_PathErrorInches`, `Profile_FeedforwardVolts`, `Profile_FeedbackVolts` | Demo 3: path error the PID sees, and the feedforward-vs-feedback voltage split |
 | `Timer_Running`, `Timer_ElapsedSec` | settle stopwatch: whether it's timing, and the live/last elapsed |
 | `Timer_LastSettleSec`, `Timer_AverageSettleSec`, `Timer_SettleCount` | most-recent settle time, running average (resets on disable), and sample count |
 | `SettleTolerance` | the "arrived" band in effect |
@@ -261,9 +270,9 @@ smooth reactive glide-in vs. following a planned profile is the money shot for t
 - **Controller is OFF on boot** — nothing drives until you click a controller button.
 - **Controllers don't run while disabled** — output holds 0 V and the PID integrator / motion-profile
   setpoint reset every disabled loop, so nothing winds up or lurches the moment you enable.
-- **Demo 3 is open-loop** — the motion profile + feedforward has no feedback term, so a mistuned kV/kG
-  can drift or run away (still capped at ±6 V). Start with small gains and watch `Profile_SetpointInches`
-  vs. `PositionInches`.
+- **Demo 3 has feedback** — the path-following PID corrects deviations, so it's far more forgiving of
+  feedforward mistuning than pure feedforward would be (still capped at `Profile_MaxVolts` ≤ 6 V).
+  Tune the feedforward first, then add kP; watch `Profile_SetpointInches` vs. `PositionInches`.
 - **Coast is the default** neutral mode: the motor freewheels when a controller commands 0 V (or in
   OFF / while disabled), so students can move the mechanism by hand to zero it. It will **not** hold
   position on its own — set `kNeutralMode` to `Brake` per mechanism in `Constants.java` if you want it
@@ -289,9 +298,8 @@ src/main/java/frc/robot/
 - **Pivot demo:** add a controller in `Pivot.java` (e.g. PID + gravity feedforward — the pivot fights
   gravity, unlike the extension). The hardware config, unit conversion, zeroing, and logging are
   already in place, and you can copy the mode-switching pattern from `LinearExtension`.
-- **Profiled PID:** combine Demo 2 and Demo 3 (a `ProfiledPIDController`, or feedforward + a small kP)
-  so the motion profile also gets closed-loop correction — the best-tracking option, and a natural
-  capstone once students have seen each piece on its own.
+- **Characterize the feedforward:** replace the guessed kS/kG/kV/kA with measured values via WPILib
+  SysId (or the bang-bang trick in §3) — Demo 3's tracking is only as good as those gains.
 
 ---
 

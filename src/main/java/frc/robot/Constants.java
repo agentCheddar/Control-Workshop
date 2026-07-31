@@ -92,6 +92,11 @@ public final class Constants {
     public static final double kDefaultMaxVelInPerSec = 10.0;
     public static final double kDefaultMaxAccelInPerSec2 = 20.0;
     public static final double kDefaultProfileMaxVolts = 6.0; // output cap, clamped to kMaxDriveVolts
+    // Path-following PID for Demo 3: corrects the error between the profile setpoint and the actual
+    // position (NOT the final goal). The feedforward does the bulk, so these are usually small.
+    public static final double kDefaultProfileKp = 1.0; // volts per inch of PATH error
+    public static final double kDefaultProfileKi = 0.0;
+    public static final double kDefaultProfileKd = 0.0;
 
     // Robot loop period; used for the motion-profile time step and feedforward discretization.
     public static final double kLoopPeriodSeconds = 0.020;

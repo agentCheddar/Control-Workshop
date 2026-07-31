@@ -44,13 +44,14 @@ import org.littletonrobotics.junction.networktables.LoggedNetworkNumber;
  * Output = kP*error + kI*(integral of error) + kD*(rate of error), clamped to a tunable max
  * voltage. Eases in smoothly as the error shrinks. Students tune kP, kI, kD live.
  *
- * <h2>Demo 3: Motion profile + feedforward</h2>
+ * <h2>Demo 3: Motion profile + feedforward + path-following PID</h2>
  *
  * A trapezoidal profile generates a smooth position/velocity setpoint that ramps up to a max
- * velocity and back down (bounded by a max acceleration), and an elevator feedforward (ks, kg, kv,
- * ka) turns that profiled motion into voltage -- it's predictive, with no feedback term. Students
- * tune ks/kg/kv/ka and the max velocity/acceleration live, and the profiled setpoint is logged so
- * it can be plotted against the actual position.
+ * velocity and back down (bounded by a max acceleration). An elevator feedforward (ks, kg, kv, ka)
+ * turns that profiled motion into voltage (predictive), and a PID corrects the error between the
+ * PROFILE setpoint and the actual position -- so it tracks the whole path, not just the endpoint.
+ * Students tune ks/kg/kv/ka, the max velocity/acceleration, the voltage cap, and the path-following
+ * kP/kI/kD live; the profiled setpoint and path error are logged.
  */
 public class LinearExtension extends SubsystemBase {
   /** Which controller is currently driving the mechanism. Exactly one at a time. */
@@ -90,6 +91,13 @@ public class LinearExtension extends SubsystemBase {
           Constants.LinearExtension.kDefaultKa,
           Constants.LinearExtension.kLoopPeriodSeconds);
   private TrapezoidProfile.State profileSetpoint = new TrapezoidProfile.State();
+  // Path-following PID for Demo 3: feedback on the error between the profile setpoint and reality.
+  // Separate from the Demo 2 `pid` so the two controllers tune independently.
+  private final PIDController profilePid =
+      new PIDController(
+          Constants.LinearExtension.kDefaultProfileKp,
+          Constants.LinearExtension.kDefaultProfileKi,
+          Constants.LinearExtension.kDefaultProfileKd);
 
   // Status signals we read each loop. Because we set SensorToMechanismRatio in the config below,
   // position/velocity come back in PINION rotations, not motor rotations.
@@ -144,6 +152,15 @@ public class LinearExtension extends SubsystemBase {
       new LoggedNetworkNumber(
           "/Tuning/LinearExtension/Profile_MaxVolts",
           Constants.LinearExtension.kDefaultProfileMaxVolts);
+  private final LoggedNetworkNumber profileKp =
+      new LoggedNetworkNumber(
+          "/Tuning/LinearExtension/Profile_kP", Constants.LinearExtension.kDefaultProfileKp);
+  private final LoggedNetworkNumber profileKi =
+      new LoggedNetworkNumber(
+          "/Tuning/LinearExtension/Profile_kI", Constants.LinearExtension.kDefaultProfileKi);
+  private final LoggedNetworkNumber profileKd =
+      new LoggedNetworkNumber(
+          "/Tuning/LinearExtension/Profile_kD", Constants.LinearExtension.kDefaultProfileKd);
   private final LoggedNetworkNumber settleTolerance =
       new LoggedNetworkNumber(
           "/Tuning/LinearExtension/Settle_Tolerance",
@@ -241,12 +258,13 @@ public class LinearExtension extends SubsystemBase {
           switch (mode) {
             case BANG_BANG -> bangBangVolts(error);
             case PID -> pidVolts(positionInches, target);
-            case MOTION_PROFILE -> profileVolts(target);
+            case MOTION_PROFILE -> profileVolts(positionInches, target);
             case OFF -> 0.0;
           };
     } else {
       outputVolts = 0.0;
-      pid.reset(); // no integral windup while disabled
+      pid.reset(); // no integral windup while disabled (Demo 2)
+      profilePid.reset(); // ...and the Demo 3 path-following PID
       profileSetpoint = new TrapezoidProfile.State(positionInches, 0.0); // keep the profile at reality
     }
 
@@ -360,8 +378,8 @@ public class LinearExtension extends SubsystemBase {
     return clamped;
   }
 
-  // ============================ DEMO 3: MOTION PROFILE + FEEDFORWARD ============================
-  private double profileVolts(double target) {
+  // ==================== DEMO 3: MOTION PROFILE + FEEDFORWARD + PATH-FOLLOWING PID ====================
+  private double profileVolts(double positionInches, double target) {
     // Output voltage cap -- tunable, but never allowed past the hardware safety ceiling.
     double maxVolts =
         MathUtil.clamp(
@@ -375,6 +393,10 @@ public class LinearExtension extends SubsystemBase {
     feedforward.setKv(kV.get());
     feedforward.setKa(kA.get());
 
+    // Live-tune the path-following PID; bound its integrator to the voltage cap to prevent windup.
+    profilePid.setPID(profileKp.get(), profileKi.get(), profileKd.get());
+    profilePid.setIntegratorRange(-maxVolts, maxVolts);
+
     // Rebuild the profile from the (live-tunable) constraints and step it one loop toward the goal.
     TrapezoidProfile profile =
         new TrapezoidProfile(
@@ -384,18 +406,29 @@ public class LinearExtension extends SubsystemBase {
     TrapezoidProfile.State next =
         profile.calculate(Constants.LinearExtension.kLoopPeriodSeconds, profileSetpoint, goal);
 
-    // Feedforward voltage to follow this step: ks/kg hold it, kv for the profiled speed, ka for the
-    // profiled acceleration (implied by the velocity change over one loop). No feedback term.
-    double volts = feedforward.calculateWithVelocities(profileSetpoint.velocity, next.velocity);
+    // Feedforward: ks/kg hold it, kv for the profiled speed, ka for the profiled acceleration
+    // (implied by the velocity change over one loop). This is the predictive part.
+    double feedforwardVolts =
+        feedforward.calculateWithVelocities(profileSetpoint.velocity, next.velocity);
+
+    // Feedback on the PATH error: the reference is the profile's setpoint position for THIS step
+    // (next.position), NOT the final goal. That's what makes the PID correct deviations along the
+    // whole trajectory instead of only at the end.
+    double feedbackVolts = profilePid.calculate(positionInches, next.position);
+
+    double volts = feedforwardVolts + feedbackVolts;
 
     profileSetpoint = next; // advance the profile for the next loop
 
-    // Log the TARGET PROFILE -- the moving setpoint the mechanism should be tracking. Plot
-    // Profile_SetpointInches on top of PositionInches to see how well the feedforward follows it.
+    // Log the TARGET PROFILE and the feedforward/feedback split. Overlay Profile_SetpointInches on
+    // PositionInches to see tracking; Profile_PathErrorInches is what the PID is chewing on.
     Logger.recordOutput("LinearExtension/Profile_SetpointInches", next.position);
     Logger.recordOutput("LinearExtension/Profile_SetpointVelInPerSec", next.velocity);
     Logger.recordOutput("LinearExtension/Profile_GoalInches", target);
     Logger.recordOutput("LinearExtension/Profile_MaxVolts", maxVolts);
+    Logger.recordOutput("LinearExtension/Profile_PathErrorInches", next.position - positionInches);
+    Logger.recordOutput("LinearExtension/Profile_FeedforwardVolts", feedforwardVolts);
+    Logger.recordOutput("LinearExtension/Profile_FeedbackVolts", feedbackVolts);
 
     return MathUtil.clamp(volts, -maxVolts, maxVolts);
   }
@@ -413,6 +446,7 @@ public class LinearExtension extends SubsystemBase {
       // Start the profile from where the mechanism actually is (assumed at rest) for a smooth
       // handoff -- otherwise it would jump from a stale setpoint.
       profileSetpoint = new TrapezoidProfile.State(getPositionInches(), 0.0);
+      profilePid.reset(); // clear the path-following integrator so it starts fresh
     }
     mode = newMode;
   }

@@ -40,6 +40,11 @@ public class RobotContainer {
         "LinearExtension/Use Motion Profile", linearExtension.useMotionProfileCommand());
     SmartDashboard.putData("LinearExtension/Disable Controller", linearExtension.disableCommand());
 
+    // Pivot controller selector (mirrors the extension, minus bang-bang).
+    SmartDashboard.putData("Pivot/Use PID", pivot.usePidCommand());
+    SmartDashboard.putData("Pivot/Use Motion Profile", pivot.useMotionProfileCommand());
+    SmartDashboard.putData("Pivot/Disable Controller", pivot.disableCommand());
+
     // Zeroing buttons (define "here" as 0" / horizontal). Safe to click while disabled.
     SmartDashboard.putData(
         "LinearExtension/Zero",

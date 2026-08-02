@@ -16,8 +16,8 @@ Teaching code for a two-mechanism control-and-tuning workshop. Built for **WPILi
 | Power | 12 V battery → breaker → **REV PDH** → roboRIO 2.0, both Krakens |
 | Controller | roboRIO 2.0, VH-109 radio over Ethernet |
 | CAN | **CTRE CANivore** bus (named `canivore`) carrying both motors |
-| Mechanism A | Linear extension — 1 Kraken X60, **30:12 (2.5:1)**, rack & **1" pitch-dia pinion**, travel **0–11.5"** |
-| Mechanism B | Pivot — 1 Kraken X60, **150:1**, zero at horizontal, range **0–100° CCW** |
+| Mechanism A | Linear extension — 1 Kraken X60, **30:12 (2.5:1)**, rack & **2.54 cm (1") pitch-dia pinion**, travel **0–29.21 cm** (11.5") |
+| Mechanism B | Pivot — 1 Kraken X60, **72/14·5·5 (~128.57:1)**, zero at horizontal, range **0–100° CCW** |
 
 ### CAN map — set these in Phoenix Tuner X to match, or edit `Constants.java`
 
@@ -60,7 +60,7 @@ Or use the WPILib command palette → **"WPILib: Deploy Robot Code"**. Build wit
 
 The linear extension carries **three controllers** the students compare, plus an OFF mode. Exactly
 one runs at a time; you switch between them with buttons on Elastic. **All drive to the same target**
-(the `Target_Inches` tunable). All the logic lives in
+(the `Target_Cm` tunable). All the logic lives in
 [`LinearExtension.java`](src/main/java/frc/robot/subsystems/LinearExtension.java): `periodic()` picks
 the active mode, and `bangBangVolts()` / `pidVolts()` / `profileVolts()` are the algorithms side by
 side.
@@ -98,14 +98,15 @@ predicts the voltage for that motion, and a **PID corrects the error against the
 (the moving point on the path — *not* the final goal), so it tracks the whole trajectory:
 
 ```
-volts = [ kS·sign(v) + kG + kV·v + kA·a ]  +  PID(profileSetpoint − position)
-        └────────── feedforward ──────────┘    └──── path-following feedback ────┘
-        (then clamped to ±Profile_MaxVolts)
+volts = [ kS·sign(v) + kV·v + kA·a ]  +  PID(profileSetpoint − position)   [+ kG added globally]
+        └──────── feedforward ───────┘    └──── path-following feedback ────┘
+        (profile part clamped to ±Profile_MaxVolts; then kG is added and the total clamped to ±6 V)
+        kG is applied in EVERY enabled mode, so it's shown separate from the profile feedforward.
 ```
 
 This is the best-tracking controller of the three: the feedforward does the bulk of the work and the
 PID cleans up whatever it misses. Because the reference is the *profile* setpoint (typically a
-fraction of an inch away), the PID stays small and gentle — it corrects path error, not the whole
+a few mm away), the PID stays small and gentle — it corrects path error, not the whole
 distance to the goal. Students tune **kS, kG, kV, kA**, the **max velocity / acceleration**, the **max
 voltage**, and the path-following **kP / kI / kD** live. Tune the feedforward first (kG for gravity —
 0 if horizontal — then kV, a small kS, kA last) so `Profile_FeedbackVolts` stays near zero, then add
@@ -128,7 +129,7 @@ The current choice is shown as text at `LinearExtension/ActiveController`.
 1. Deploy, open **Elastic**, connect to the robot.
 2. Open the Driver Station and **Enable** (Teleop). *(Motors only move while enabled — that's the FRC
    safety interlock, not a bug.)*
-3. Click **Use Bang-Bang**, **Use PID**, or **Use Motion Profile**, then change `Target_Inches` and
+3. Click **Use Bang-Bang**, **Use PID**, or **Use Motion Profile**, then change `Target_Cm` and
    tune.
 
 ### What students tune in Elastic
@@ -138,24 +139,24 @@ text/number widget or slider; editing takes effect immediately, no redeploy):
 
 | NT key | Meaning | Default |
 | --- | --- | --- |
-| `Tuning/LinearExtension/Target_Inches` | **Shared** setpoint both controllers drive to (clamped 0–11.5") | 4.0 |
+| `Tuning/LinearExtension/Target_Cm` | **Shared** setpoint both controllers drive to (clamped 0–29.21 cm) | 10.16 |
 | `Tuning/LinearExtension/Kv_Volts` | Demo 1: fixed drive voltage magnitude. **Clamped to 0–6 V.** | 2.0 |
-| `Tuning/LinearExtension/Deadband_Inches` | Demo 1: how close to the target counts as "there" | 0.25 |
-| `Tuning/LinearExtension/kP` | Demo 2: proportional gain (volts per inch of error) | 1.0 |
+| `Tuning/LinearExtension/Deadband_Cm` | Demo 1: how close to the target counts as "there" | 0.635 |
+| `Tuning/LinearExtension/kP` | Demo 2: proportional gain (volts per cm of error) | 0.3937 |
 | `Tuning/LinearExtension/kI` | Demo 2: integral gain | 0.0 |
 | `Tuning/LinearExtension/kD` | Demo 2: derivative gain | 0.0 |
 | `Tuning/LinearExtension/PID_MaxVolts` | Demo 2: output voltage cap. **Clamped to 0–6 V.** | 4.0 |
 | `Tuning/LinearExtension/kS` | Demo 3: static-friction feedforward (V) | 0.1 |
-| `Tuning/LinearExtension/kG` | Demo 3: gravity feedforward (V; 0 if horizontal) | 0.0 |
-| `Tuning/LinearExtension/kV` | Demo 3: velocity feedforward (V per inch/sec) | 0.5 |
-| `Tuning/LinearExtension/kA` | Demo 3: acceleration feedforward (V per inch/sec²) | 0.0 |
-| `Tuning/LinearExtension/Profile_MaxVel_InPerSec` | Demo 3: profile top speed (inch/sec) | 10.0 |
-| `Tuning/LinearExtension/Profile_MaxAccel_InPerSec2` | Demo 3: profile acceleration (inch/sec²) | 20.0 |
+| `Tuning/LinearExtension/kG` | Gravity feedforward (V) — applied in **every enabled mode**, not just Demo 3 (0 if horizontal) | 0.0 |
+| `Tuning/LinearExtension/kV` | Demo 3: velocity feedforward (V per cm/s) | 0.19685 |
+| `Tuning/LinearExtension/kA` | Demo 3: acceleration feedforward (V per cm/s²) | 0.0 |
+| `Tuning/LinearExtension/Profile_MaxVel_CmPerSec` | Demo 3: profile top speed (cm/s) | 25.4 |
+| `Tuning/LinearExtension/Profile_MaxAccel_CmPerSec2` | Demo 3: profile acceleration (cm/s²) | 50.8 |
 | `Tuning/LinearExtension/Profile_MaxVolts` | Demo 3: output voltage cap. **Clamped to 0–6 V.** | 6.0 |
-| `Tuning/LinearExtension/Profile_kP` | Demo 3: path-following gain (V per inch of *path* error) | 1.0 |
+| `Tuning/LinearExtension/Profile_kP` | Demo 3: path-following gain (V per cm of *path* error) | 0.3937 |
 | `Tuning/LinearExtension/Profile_kI` | Demo 3: path-following integral gain | 0.0 |
 | `Tuning/LinearExtension/Profile_kD` | Demo 3: path-following derivative gain | 0.0 |
-| `Tuning/LinearExtension/Settle_Tolerance` | Settle timer: "arrived" band for both position (in) and speed (in/s) | 0.25 |
+| `Tuning/LinearExtension/Settle_Tolerance` | Settle timer: "arrived" band for both position (cm) and speed (cm/s) | 0.635 |
 
 > `Kv_Volts` is labeled **Kv** per the workshop plan. Note that "Kv" normally means a velocity
 > feedforward gain — here it is simply the fixed bang-bang voltage. The code comments call this out
@@ -176,7 +177,7 @@ Elastic shows these command buttons (published from `RobotContainer`):
 
 A settle stopwatch runs for whichever controller is active:
 
-- **Starts** the moment you change `Target_Inches` (a new commanded move).
+- **Starts** the moment you change `Target_Cm` (a new commanded move).
 - **Stops** once the mechanism is within `Settle_Tolerance` of the target **and** its speed is within
   that same tolerance of zero — i.e. it actually arrived and stopped, not just blew past.
 - **`Timer_LastSettleSec`** is that move's time; **`Timer_AverageSettleSec`** averages all moves since
@@ -201,11 +202,11 @@ active (not OFF) — so a controller switch alone won't restart it. Nudge the ta
 **PID:**
 - **kP too low** → sluggish, stops short. **Too high** → overshoot and oscillation.
 - **kD** → damps overshoot; too much makes it jittery/noisy.
-- **kI** → erases steady-state error (the last fraction of an inch), but too much causes slow
+- **kI** → erases steady-state error (the last sliver), but too much causes slow
   oscillation / windup.
 
 **Motion profile + feedforward + PID:**
-- **kV too low** → lags behind the profile (actual trails `Profile_SetpointInches`). **Too high** →
+- **kV too low** → lags behind the profile (actual trails `Profile_SetpointCm`). **Too high** →
   runs ahead / overshoots.
 - **kG** → if it drifts down at rest, raise kG; if it creeps up, lower it.
 - **kS** → just enough to break static friction; too much makes it lurch off the start.
@@ -214,8 +215,8 @@ active (not OFF) — so a controller switch alone won't restart it. Nudge the ta
   then raise kP to snap the actual position onto the profile line; kD damps, kI erases the last bit
   of steady-state error. Since it corrects against the *moving* setpoint, a little goes a long way.
 
-**The payoff:** switch between all three on the same target and watch `PositionInches` vs.
-`TargetInches` (and `Profile_SetpointInches` for Demo 3). Bang-bang chatters; a tuned PID glides in
+**The payoff:** switch between all three on the same target and watch `PositionCm` vs.
+`TargetCm` (and `Profile_SetpointCm` for Demo 3). Bang-bang chatters; a tuned PID glides in
 reactively; the motion profile follows a planned trajectory (feedforward predicting the motion, a
 small PID correcting the path). That progression is the whole point of the workshop.
 
@@ -236,23 +237,49 @@ AdvantageKit records everything below to a `.wpilog` (USB) **and** streams it li
 | Linear extension (`RealOutputs/LinearExtension/`) | |
 | --- | --- |
 | `ControlMode` | which controller is active (`OFF` / `BANG_BANG` / `PID` / `MOTION_PROFILE`) |
-| `PositionInches`, `TargetInches`, `ErrorInches` | plot these three together |
-| `MotorRotations` | raw rotor turns (before the 30:12) vs. `PositionInches` shows the gearing |
-| `CommandedVolts`, `AppliedVolts` | what the controller asked for vs. what the motor did |
-| `ClampedKv`, `DeadbandInches` | Demo 1 (bang-bang) values in effect |
+| `PositionCm`, `TargetCm`, `ErrorCm` | plot these three together |
+| `MotorRotations` | raw rotor turns (before the 30:12) vs. `PositionCm` shows the gearing |
+| `CommandedVolts`, `GravityVolts`, `AppliedVolts` | total command (incl. gravity), the always-on kG term, and what the motor did |
+| `ClampedKv`, `DeadbandCm` | Demo 1 (bang-bang) values in effect |
 | `PID_RawVolts`, `PID_MaxVolts` | Demo 2: PID output before clamping, and the cap |
-| `Profile_SetpointInches`, `Profile_SetpointVelInPerSec`, `Profile_GoalInches`, `Profile_MaxVolts` | Demo 3: the moving profile target (overlay on `PositionInches`) and the output cap |
-| `Profile_PathErrorInches`, `Profile_FeedforwardVolts`, `Profile_FeedbackVolts` | Demo 3: path error the PID sees, and the feedforward-vs-feedback voltage split |
+| `Profile_SetpointCm`, `Profile_SetpointVelCmPerSec`, `Profile_GoalCm`, `Profile_MaxVolts` | Demo 3: the moving profile target (overlay on `PositionCm`) and the output cap |
+| `Profile_PathErrorCm`, `Profile_FeedforwardVolts`, `Profile_FeedbackVolts` | Demo 3: path error the PID sees, and the feedforward-vs-feedback voltage split |
 | `Timer_Running`, `Timer_ElapsedSec` | settle stopwatch: whether it's timing, and the live/last elapsed |
 | `Timer_LastSettleSec`, `Timer_AverageSettleSec`, `Timer_SettleCount` | most-recent settle time, running average (resets on disable), and sample count |
 | `SettleTolerance` | the "arrived" band in effect |
-| `VelocityInchesPerSec`, `StatorCurrentAmps`, `SupplyCurrentAmps` | motor-side vs. battery-side current |
+| `VelocityCmPerSec`, `StatorCurrentAmps`, `SupplyCurrentAmps` | motor-side vs. battery-side current |
 
-Pivot logs `PositionDegrees` (mechanism), `MotorRotations` (raw rotor), `VelocityDegreesPerSec`, `AppliedVolts`, `StatorCurrentAmps`, `SupplyCurrentAmps`.
+The **pivot** logs the same telemetry in degrees (`PositionDegrees`, `MotorRotations`,
+`VelocityDegreesPerSec`, `AppliedVolts`, `StatorCurrentAmps`, `SupplyCurrentAmps`) plus its controller
+signals (`ControlMode`, `TargetDegrees`, `ErrorDegrees`, `CommandedVolts`, `PID_RawVolts`, and the
+`Profile_*` family incl. `Profile_SetpointDegrees` / `Profile_FeedforwardVolts` / `Profile_FeedbackVolts`).
 
-Plot `PositionInches` against `TargetInches` (and `Profile_SetpointInches` for Demo 3), then cycle
+Plot `PositionCm` against `TargetCm` (and `Profile_SetpointCm` for Demo 3), then cycle
 through **Use Bang-Bang**, **Use PID**, and **Use Motion Profile** on the same target — chatter vs. a
 smooth reactive glide-in vs. following a planned profile is the money shot for the workshop.
+
+### The pivot (Mechanism B) — PID + motion profile
+
+The pivot carries two of the same controllers, adapted for an arm (buttons `Pivot/Use PID`,
+`Pivot/Use Motion Profile`, `Pivot/Disable Controller`; shared target `Tuning/Pivot/Target_Degrees`,
+0–100°, boots OFF):
+
+- **PID** — pure feedback to the target angle. It has **no gravity term**, so it will sag by a
+  gravity-dependent amount that changes with angle — that's the intended lesson (why arms need
+  feedforward). Tunables: `Tuning/Pivot/kP`, `kI`, `kD`, `PID_MaxVolts`.
+- **Motion profile + feedforward + PID** — a trapezoidal profile (deg/s) plus an **`ArmFeedforward`**
+  whose gravity term is **kG·cos(angle)**, so it holds correctly at *every* angle (not just one, as a
+  constant kG would). Then a path-following PID cleans up. Tunables: `kS`, `kG`, `kV`, `kA`,
+  `Profile_MaxVel_DegPerSec`, `Profile_MaxAccel_DegPerSec2`, `Profile_MaxVolts`, `Profile_kP/kI/kD`.
+
+Because zero is horizontal, the feedforward gets the angle directly (it's measured from horizontal).
+Tune **kG first** — the voltage that holds the arm level — then kV, kS, and the path-following kP. The
+gains are guesses; characterize them (SysId or the bang-bang trick) for real numbers. Units note: kV
+is **V per deg/s** and the angle is converted to radians only for the gravity cos term.
+
+The **settle timer** runs for the pivot too (`Tuning/Pivot/Settle_Tolerance`, default 1° / 1°/s; logs
+`Pivot/Timer_LastSettleSec` and `Pivot/Timer_AverageSettleSec`, the average resetting on disable), so
+you can time PID vs. motion-profile the same way as the extension.
 
 ---
 
@@ -261,7 +288,7 @@ smooth reactive glide-in vs. following a planned profile is the money shot for t
 - **Check the drive direction first.** With a low `Kv` (≈1 V) and a target above current position, the
   mechanism should **extend**. If it retracts, flip `LinearExtension.kInvert` in `Constants.java` to
   `Clockwise_Positive` (same for the pivot).
-- **Soft limits** at 0" / 11.5" (and 0° / 100°) are enforced by the TalonFX as a backstop — but they
+- **Soft limits** at 0 / 29.21 cm (and 0° / 100°) are enforced by the TalonFX as a backstop — but they
   are only correct **after** you've zeroed. Zero at a known pose before enabling.
 - **Current limits** are set to 40 A (stator & supply). Lower them in `Constants.java` for a gentler
   demo.
@@ -270,9 +297,14 @@ smooth reactive glide-in vs. following a planned profile is the money shot for t
 - **Controller is OFF on boot** — nothing drives until you click a controller button.
 - **Controllers don't run while disabled** — output holds 0 V and the PID integrator / motion-profile
   setpoint reset every disabled loop, so nothing winds up or lurches the moment you enable.
+- **`kG` (gravity) is applied in every enabled mode** on the extension — even OFF — so it holds against
+  gravity whenever enabled, not just under the profile. On enable the mechanism will apply `kG` V
+  immediately; if `kG` is set too high it can creep upward, so tune it (the voltage that just holds it
+  still). Leave `kG` at 0 if the extension is horizontal. *(This is the extension only; the pivot's
+  gravity term still applies only under its profile controller.)*
 - **Demo 3 has feedback** — the path-following PID corrects deviations, so it's far more forgiving of
   feedforward mistuning than pure feedforward would be (still capped at `Profile_MaxVolts` ≤ 6 V).
-  Tune the feedforward first, then add kP; watch `Profile_SetpointInches` vs. `PositionInches`.
+  Tune the feedforward first, then add kP; watch `Profile_SetpointCm` vs. `PositionCm`.
 - **Coast is the default** neutral mode: the motor freewheels when a controller commands 0 V (or in
   OFF / while disabled), so students can move the mechanism by hand to zero it. It will **not** hold
   position on its own — set `kNeutralMode` to `Brake` per mechanism in `Constants.java` if you want it
@@ -290,16 +322,15 @@ src/main/java/frc/robot/
   Constants.java         CAN IDs, gear ratios, travel & safety limits, controller defaults
   subsystems/
     LinearExtension.java  ← Demos 1–3: bang-bang + PID + motion profile, mode switching, tunables, logging
-    Pivot.java            scaffold: config + telemetry + zero (controller = later demo)
+    Pivot.java            PID + motion profile (ArmFeedforward, gravity = kG·cos θ), mode switching, logging
 ```
 
 ## 7. Next steps
 
-- **Pivot demo:** add a controller in `Pivot.java` (e.g. PID + gravity feedforward — the pivot fights
-  gravity, unlike the extension). The hardware config, unit conversion, zeroing, and logging are
-  already in place, and you can copy the mode-switching pattern from `LinearExtension`.
-- **Characterize the feedforward:** replace the guessed kS/kG/kV/kA with measured values via WPILib
-  SysId (or the bang-bang trick in §3) — Demo 3's tracking is only as good as those gains.
+- **Characterize the feedforward:** replace the guessed kS/kG/kV/kA (both mechanisms) with measured
+  values via WPILib SysId (or the bang-bang trick in §3) — the tracking is only as good as those gains.
+  The pivot's **kG** especially is a placeholder; measure the voltage that holds the arm level.
+- **Optional parity:** add bang-bang and/or the settle timer to the pivot to fully match the extension.
 
 ---
 
